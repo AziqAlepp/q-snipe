@@ -32,7 +32,6 @@ jobs:
           set -e
           rm -f test/widget_test.dart android/app/build.gradle
           mkdir -p lib/core lib/services lib/app assets/sounds test android/app/src/main
-
           cat > pubspec.yaml <<'QSEOF'
           name: queue_sniper
           description: Discord queue-button sniper for Android (Gateway listener + interaction click).
@@ -50,6 +49,7 @@ jobs:
             audioplayers: ^6.0.0
             flutter_secure_storage: ^9.2.2
             shared_preferences: ^2.2.3
+            webview_flutter: ^4.9.0
 
           dev_dependencies:
             flutter_test:
@@ -100,6 +100,7 @@ jobs:
           import '../core/models.dart';
           import '../services/notification_service.dart';
           import '../services/storage.dart';
+          import 'web_login_page.dart';
 
           class HomePage extends StatefulWidget {
             const HomePage({super.key});
@@ -178,11 +179,8 @@ jobs:
             // ---- token -------------------------------------------------------------
 
             Future<void> _saveToken() async {
-              var t = _tokenCtl.text.trim();
-              if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
-                t = t.substring(1, t.length - 1);
-              }
-              if (t.length < 20 || RegExp(r'\s').hasMatch(t)) {
+              final t = normalizeCapturedToken(_tokenCtl.text);
+              if (t == null) {
                 _toast('That does not look like a Discord token.');
                 return;
               }
@@ -191,6 +189,17 @@ jobs:
               if (!mounted) return;
               setState(() => _hasToken = true);
               _toast('Token saved to the secure keystore.');
+            }
+
+            Future<void> _webLogin() async {
+              final t = await Navigator.of(context).push<String>(
+                MaterialPageRoute(builder: (_) => const WebLoginPage()),
+              );
+              if (t == null) return;
+              await _storage.writeToken(t);
+              if (!mounted) return;
+              setState(() => _hasToken = true);
+              _toast('TOKEN AUTO-CAPTURED and saved to the keystore.');
             }
 
             Future<void> _clearToken() async {
@@ -338,10 +347,19 @@ jobs:
                             ],
                           ),
                           const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: _running ? null : _webLogin,
+                              icon: const Icon(Icons.login),
+                              label: const Text('LOGIN WITH DISCORD'),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
                           const Text(
-                            'How to get it: Discord Web in a browser > DevTools > '
-                            'Network tab > any request > copy the "Authorization" '
-                            'header value.',
+                            'Login captures the token for you. Manual option: Discord '
+                            'Web in a desktop browser > DevTools > Network tab > any '
+                            'request > copy the "Authorization" header value.',
                             style: TextStyle(fontSize: 12),
                           ),
                         ],
@@ -568,11 +586,118 @@ jobs:
             }
           }
           QSEOF
+          cat > lib/app/web_login_page.dart <<'QSEOF'
+          import 'dart:async';
+
+          import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+
+          import '../core/models.dart';
+
+          /// Real discord.com login inside a WebView. Once the page reaches /channels,
+          /// the token Discord keeps in its web storage is read and returned to the
+          /// caller (Navigator.pop with the token). It never leaves the device.
+          class WebLoginPage extends StatefulWidget {
+            const WebLoginPage({super.key});
+
+            @override
+            State<WebLoginPage> createState() => _WebLoginPageState();
+          }
+
+          class _WebLoginPageState extends State<WebLoginPage> {
+            // Discord removes window.localStorage, so a fresh iframe's copy is read.
+            // Same idea as the reference APK's embedded script.
+            static const String _js = '''
+          (function(){try{var f=document.createElement('iframe');document.body.appendChild(f);var t=f.contentWindow.localStorage.getItem('token');f.remove();return t;}catch(e){return null;}})()
+          ''';
+
+            late final WebViewController _controller;
+            Timer? _poll;
+            bool _busy = false;
+
+            @override
+            void initState() {
+              super.initState();
+              _controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..loadRequest(Uri.parse('https://discord.com/login'));
+              _poll = Timer.periodic(const Duration(seconds: 2), (_) => _check());
+            }
+
+            @override
+            void dispose() {
+              _poll?.cancel();
+              super.dispose();
+            }
+
+            Future<void> _check() async {
+              if (_busy || !mounted) return;
+              _busy = true;
+              try {
+                final url = await _controller.currentUrl();
+                if (url == null || !url.contains('/channels')) return;
+                final res = await _controller.runJavaScriptReturningResult(_js);
+                final token = normalizeCapturedToken(res.toString());
+                if (token != null && mounted) {
+                  _poll?.cancel();
+                  Navigator.of(context).pop(token);
+                }
+              } catch (_) {
+                // Page not ready or script blocked: try again on the next tick.
+              } finally {
+                _busy = false;
+              }
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('Discord login')),
+                body: Column(
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Text(
+                        'Log in normally. The token is captured automatically once '
+                        'your channel list opens.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    Expanded(child: WebViewWidget(controller: _controller)),
+                  ],
+                ),
+              );
+            }
+          }
+          QSEOF
           cat > lib/core/models.dart <<'QSEOF'
           import 'dart:convert';
 
           /// Discord ids are 64-bit snowflakes, 15-21 decimal digits in practice.
           bool isSnowflake(String s) => RegExp(r'^\d{15,21}$').hasMatch(s);
+
+          /// Cleans a token as pasted by the user or returned by the WebView script:
+          /// strips (possibly nested/escaped) JSON quotes and rejects anything that
+          /// can't be a token. Returns null when invalid.
+          String? normalizeCapturedToken(String? raw) {
+            var t = (raw ?? '').trim();
+            for (var i = 0; i < 3; i++) {
+              if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+                try {
+                  final d = jsonDecode(t);
+                  if (d is String) {
+                    t = d.trim();
+                    continue;
+                  }
+                } catch (_) {}
+                t = t.substring(1, t.length - 1);
+              } else {
+                break;
+              }
+            }
+            if (t == 'null' || t.length < 20 || RegExp(r'\s').hasMatch(t)) return null;
+            return t;
+          }
 
           /// Only real Discord webhook URLs are accepted, so a typo can't send
           /// snipe reports to an arbitrary host.
@@ -1827,6 +1952,17 @@ jobs:
                     isFalse);
                 expect(isValidWebhookUrl('http://discord.com/api/webhooks/1/abc'),
                     isFalse);
+              });
+
+              test('captured token normalisation', () {
+                const tok = 'MTExMTExMTExMTExMTExMTEx.abcdef.0123456789abcdefghij';
+                expect(normalizeCapturedToken(tok), tok);
+                expect(normalizeCapturedToken('"$tok"'), tok);
+                expect(normalizeCapturedToken('"\\"$tok\\""'), tok);
+                expect(normalizeCapturedToken('null'), isNull);
+                expect(normalizeCapturedToken('short'), isNull);
+                expect(normalizeCapturedToken('has space in the middle of it ok'),
+                    isNull);
               });
 
               test('config round-trips and survives garbage', () {
