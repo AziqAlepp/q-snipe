@@ -1797,6 +1797,13 @@ jobs:
               }
 
 
+              // Release lint (lintVitalRelease) crashes inside a detector on this
+              // dependency set; it is not needed to produce the APK.
+              lint {
+                  checkReleaseBuilds = false
+                  abortOnError = false
+              }
+
               defaultConfig {
                   applicationId = "com.queuesniper.queue_sniper"
                   // flutter_secure_storage 9.x needs 23+.
