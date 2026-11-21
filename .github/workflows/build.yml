@@ -118,6 +118,7 @@ jobs:
             final TextEditingController _webhookCtl = TextEditingController();
             final TextEditingController _spamCountCtl = TextEditingController();
             final TextEditingController _spamIntervalCtl = TextEditingController();
+            final TextEditingController _pollCtl = TextEditingController();
             final List<String> _log = [];
 
             List<Profile> _profiles = const [];
@@ -175,6 +176,7 @@ jobs:
               _webhookCtl.dispose();
               _spamCountCtl.dispose();
               _spamIntervalCtl.dispose();
+              _pollCtl.dispose();
               super.dispose();
             }
 
@@ -190,6 +192,7 @@ jobs:
               _webhookCtl.text = c?.webhookUrl ?? '';
               _spamCountCtl.text = (c?.spamCount ?? 10).toString();
               _spamIntervalCtl.text = (c?.spamIntervalMs ?? 0).toString();
+              _pollCtl.text = (c?.pollSeconds ?? 0).toString();
             }
 
             Future<void> _updateSel(Profile Function(Profile) change) async {
@@ -493,7 +496,4 @@ jobs:
                                 title: Text('GUILD ${cfg.targets[i].guildId}'),
                                 subtitle: Text(
                                   'channel ${cfg.targets[i].channelId}\n'
-                                  '${cfg.targets[i].customButtonId.isNotEmpty ? 'button id: ${cfg.targets[i].customButtonId}' : 'keywords: ${cfg.targets[i].keywords.isEmpty ? '(any button)' : cfg.targets[i].keywords.join(', ')}'}',
-                                ),
-                                isThreeLine: true,
-                                trailing: Ico
+                                  '${cfg.targets[i].customButtonId.isNotEmpty ? 'button id: ${cfg.targets[i].customButtonId}' : 'keywords: ${cfg.targets[i].keywords.isEmpty ? '(any button)'
