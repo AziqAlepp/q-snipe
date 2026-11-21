@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/setup-java@v4
         with:
@@ -494,4 +496,1398 @@ jobs:
               final g = _guild.text.trim();
               final c = _channel.text.trim();
               if (!isSnowflake(g) || !isSnowflake(c)) {
-                setState(() => _error = 'Guild and channel ids must be 15-21 digit
+                setState(() => _error = 'Guild and channel ids must be 15-21 digits.');
+                return;
+              }
+              final kw = _keywords.text
+                  .split(',')
+                  .map((e) => e.trim())
+                  .where((e) => e.isNotEmpty)
+                  .toList();
+              Navigator.pop(
+                context,
+                QueueTarget(
+                  guildId: g,
+                  channelId: c,
+                  customButtonId: _button.text.trim(),
+                  keywords: kw,
+                ),
+              );
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return AlertDialog(
+                title: const Text('Queue channel'),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: _guild,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(labelText: 'GUILD ID'),
+                      ),
+                      TextField(
+                        controller: _channel,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(labelText: 'CHANNEL ID (QUEUE)'),
+                      ),
+                      TextField(
+                        controller: _button,
+                        decoration: const InputDecoration(
+                          labelText: 'CUSTOM BUTTON ID (OPTIONAL)',
+                        ),
+                      ),
+                      TextField(
+                        controller: _keywords,
+                        decoration: const InputDecoration(
+                          labelText: 'Label keywords (used when no button id)',
+                          helperText: 'comma separated; empty = first button',
+                        ),
+                      ),
+                      if (_error != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(
+                            _error!,
+                            style: TextStyle(color: Theme.of(context).colorScheme.error),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('CANCEL'),
+                  ),
+                  FilledButton(onPressed: _submit, child: const Text('ADD')),
+                ],
+              );
+            }
+          }
+          QSEOF
+          cat > lib/core/models.dart <<'QSEOF'
+          import 'dart:convert';
+
+          /// Discord ids are 64-bit snowflakes, 15-21 decimal digits in practice.
+          bool isSnowflake(String s) => RegExp(r'^\d{15,21}$').hasMatch(s);
+
+          /// Only real Discord webhook URLs are accepted, so a typo can't send
+          /// snipe reports to an arbitrary host.
+          bool isValidWebhookUrl(String url) {
+            final uri = Uri.tryParse(url.trim());
+            if (uri == null || uri.scheme != 'https') return false;
+            const hosts = {
+              'discord.com',
+              'ptb.discord.com',
+              'canary.discord.com',
+              'discordapp.com',
+            };
+            return hosts.contains(uri.host) && uri.path.startsWith('/api/webhooks/');
+          }
+
+          class QueueTarget {
+            const QueueTarget({
+              required this.guildId,
+              required this.channelId,
+              this.customButtonId = '',
+              this.keywords = defaultKeywords,
+            });
+
+            /// Used when no custom button id is set. Design choice of this project,
+            /// editable per queue. An empty list means "first clickable button".
+            static const List<String> defaultKeywords = ['join', 'queue'];
+
+            final String guildId;
+            final String channelId;
+
+            /// Exact `custom_id` of the button to click. Empty string = not set.
+            final String customButtonId;
+            final List<String> keywords;
+
+            Map<String, dynamic> toJson() => {
+                  'guildId': guildId,
+                  'channelId': channelId,
+                  'customButtonId': customButtonId,
+                  'keywords': keywords,
+                };
+
+            factory QueueTarget.fromJson(Map<String, dynamic> json) {
+              final kw = json['keywords'];
+              return QueueTarget(
+                guildId: (json['guildId'] ?? '').toString(),
+                channelId: (json['channelId'] ?? '').toString(),
+                customButtonId: (json['customButtonId'] ?? '').toString(),
+                keywords: kw is List
+                    ? kw.map((e) => e.toString()).toList()
+                    : defaultKeywords,
+              );
+            }
+          }
+
+          class SniperConfig {
+            const SniperConfig({
+              this.targets = const [],
+              this.webhookUrl = '',
+              this.soundEnabled = true,
+              this.notifyEnabled = true,
+            });
+
+            final List<QueueTarget> targets;
+            final String webhookUrl;
+            final bool soundEnabled;
+            final bool notifyEnabled;
+
+            SniperConfig copyWith({
+              List<QueueTarget>? targets,
+              String? webhookUrl,
+              bool? soundEnabled,
+              bool? notifyEnabled,
+            }) =>
+                SniperConfig(
+                  targets: targets ?? this.targets,
+                  webhookUrl: webhookUrl ?? this.webhookUrl,
+                  soundEnabled: soundEnabled ?? this.soundEnabled,
+                  notifyEnabled: notifyEnabled ?? this.notifyEnabled,
+                );
+
+            Map<String, dynamic> toJson() => {
+                  'targets': targets.map((t) => t.toJson()).toList(),
+                  'webhookUrl': webhookUrl,
+                  'soundEnabled': soundEnabled,
+                  'notifyEnabled': notifyEnabled,
+                };
+
+            String encode() => jsonEncode(toJson());
+
+            static SniperConfig decode(String? raw) {
+              if (raw == null || raw.isEmpty) return const SniperConfig();
+              try {
+                final j = jsonDecode(raw);
+                if (j is! Map<String, dynamic>) return const SniperConfig();
+                final t = j['targets'];
+                return SniperConfig(
+                  targets: t is List
+                      ? t
+                          .whereType<Map<String, dynamic>>()
+                          .map(QueueTarget.fromJson)
+                          .toList()
+                      : const [],
+                  webhookUrl: (j['webhookUrl'] ?? '').toString(),
+                  soundEnabled: j['soundEnabled'] != false,
+                  notifyEnabled: j['notifyEnabled'] != false,
+                );
+              } catch (_) {
+                return const SniperConfig();
+              }
+            }
+          }
+          QSEOF
+          cat > lib/core/button_matcher.dart <<'QSEOF'
+          import 'models.dart';
+
+          /// Pure helpers (no I/O) so they can be unit-tested without Discord.
+
+          const int discordEpochMs = 1420070400000; // 2015-01-01T00:00:00Z
+
+          class ButtonMatch {
+            const ButtonMatch({required this.customId, required this.label});
+            final String customId;
+            final String label;
+          }
+
+          /// Discord snowflake built from the current time; used as interaction nonce.
+          /// Dart VM ints are 64-bit, so the shift cannot overflow on Android.
+          String generateNonce({int? nowMs}) {
+            final ms = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+            return ((ms - discordEpochMs) << 22).toString();
+          }
+
+          /// Walks the component tree. Handles classic action rows (type 1 ->
+          /// components) and nested layouts (containers/sections with `components`
+          /// or `accessory`), collecting every button (type 2).
+          void _collectButtons(dynamic node, List<Map<String, dynamic>> out) {
+            if (node is List) {
+              for (final e in node) {
+                _collectButtons(e, out);
+              }
+            } else if (node is Map) {
+              if (node['type'] == 2) {
+                out.add(Map<String, dynamic>.from(node));
+              }
+              _collectButtons(node['components'], out);
+              _collectButtons(node['accessory'], out);
+            }
+          }
+
+          const List<String> _negativeWords = ['leave', 'cancel', 'exit', 'quit'];
+
+          /// Returns the button to click, or null.
+          /// - Link buttons (style 5) and disabled buttons are never clickable.
+          /// - If [target.customButtonId] is set, only an exact custom_id match counts.
+          /// - Otherwise the first button whose label or custom_id contains one of
+          ///   [target.keywords] (case-insensitive); with no keywords, the first
+          ///   clickable button.
+          ButtonMatch? findButton(dynamic components, QueueTarget target) {
+            final buttons = <Map<String, dynamic>>[];
+            _collectButtons(components, buttons);
+
+            final wanted = target.customButtonId.trim();
+            final keywords = target.keywords
+                .map((k) => k.trim().toLowerCase())
+                .where((k) => k.isNotEmpty)
+                .toList();
+
+            for (final b in buttons) {
+              if (b['style'] == 5 || b['disabled'] == true) continue;
+              final id = b['custom_id'];
+              if (id is! String || id.isEmpty) continue;
+              final label = (b['label'] ?? '').toString();
+
+              if (wanted.isNotEmpty) {
+                if (id == wanted) return ButtonMatch(customId: id, label: label);
+                continue;
+              }
+              final hay = '${label.toLowerCase()} ${id.toLowerCase()}';
+              // Keyword mode must never press "Leave queue" and friends.
+              if (_negativeWords.any(hay.contains)) continue;
+              if (keywords.isEmpty) return ButtonMatch(customId: id, label: label);
+              if (keywords.any(hay.contains)) {
+                return ButtonMatch(customId: id, label: label);
+              }
+            }
+            return null;
+          }
+
+          /// Body for POST /api/v10/interactions (component click).
+          /// Field set taken from the string table of the reference APK plus the
+          /// public behaviour of Discord clients; not yet verified against live traffic.
+          Map<String, dynamic> buildInteractionBody({
+            required String guildId,
+            required String channelId,
+            required String messageId,
+            required int messageFlags,
+            required String applicationId,
+            required String sessionId,
+            required String customId,
+            String? nonce,
+          }) =>
+              {
+                'type': 3,
+                'nonce': nonce ?? generateNonce(),
+                'guild_id': guildId,
+                'channel_id': channelId,
+                'message_flags': messageFlags,
+                'message_id': messageId,
+                'application_id': applicationId,
+                'session_id': sessionId,
+                'data': {
+                  'component_type': 2,
+                  'custom_id': customId,
+                },
+              };
+          QSEOF
+          cat > lib/core/discord_rest.dart <<'QSEOF'
+          import 'dart:async';
+          import 'dart:convert';
+          import 'dart:io';
+
+          class RestResult {
+            const RestResult(this.status, this.body);
+            final int status;
+            final String body;
+            bool get ok => status >= 200 && status < 300;
+          }
+
+          /// Minimal REST client on dart:io. One HttpClient is kept alive so the TLS
+          /// connection to discord.com is reused (warmed by [validateToken]).
+          class DiscordRest {
+            DiscordRest(this._token) {
+              _http
+                ..userAgent = userAgent
+                ..connectionTimeout = const Duration(seconds: 10)
+                ..idleTimeout = const Duration(seconds: 90);
+            }
+
+            /// String taken from the reference APK's string table.
+            static const String userAgent =
+                'Discord-Android/219014; Mozilla/5.0 (Linux; Android 15; Mobile)';
+            static const String apiBase = 'https://discord.com/api/v10';
+
+            final String _token;
+            final HttpClient _http = HttpClient();
+
+            Future<RestResult> _send(
+              String method,
+              Uri uri, {
+              Object? json,
+              bool auth = true,
+            }) async {
+              final req = await _http.openUrl(method, uri);
+              if (auth) req.headers.set(HttpHeaders.authorizationHeader, _token);
+              if (json != null) {
+                req.headers.contentType = ContentType.json;
+                req.add(utf8.encode(jsonEncode(json)));
+              }
+              final res = await req.close().timeout(const Duration(seconds: 10));
+              final text = await utf8.decodeStream(res);
+              return RestResult(res.statusCode, text);
+            }
+
+            /// GET /users/@me. Returns the username, or throws [StateError] on 401.
+            Future<String> validateToken() async {
+              final r = await _send('GET', Uri.parse('$apiBase/users/@me'));
+              if (r.status == 401) {
+                throw StateError('Invalid Discord token or unauthorized (401).');
+              }
+              if (!r.ok) throw StateError('users/@me returned HTTP ${r.status}');
+              final j = jsonDecode(r.body);
+              if (j is Map && j['username'] is String) return j['username'] as String;
+              return '?';
+            }
+
+            Future<RestResult> postInteraction(Map<String, dynamic> body) =>
+                _send('POST', Uri.parse('$apiBase/interactions'), json: body);
+
+            /// Webhook calls carry no Authorization header.
+            Future<RestResult> postWebhook(String url, Map<String, dynamic> body) =>
+                _send('POST', Uri.parse(url), json: body, auth: false);
+
+            void close() => _http.close(force: true);
+          }
+          QSEOF
+          cat > lib/core/gateway_client.dart <<'QSEOF'
+          import 'dart:async';
+          import 'dart:convert';
+          import 'dart:io';
+          import 'dart:math';
+
+          typedef DispatchHandler = void Function(
+            String type,
+            Map<String, dynamic> data,
+            Stopwatch sinceReceived,
+          );
+
+          /// Discord Gateway v10 client (JSON, no compression) for a user token.
+          /// Handles HELLO, IDENTIFY, heartbeat + zombie detection, RESUME,
+          /// RECONNECT, INVALID_SESSION and backoff reconnects.
+          class GatewayClient {
+            GatewayClient({
+              required this.token,
+              required this.onDispatch,
+              required this.onLog,
+              required this.onFatal,
+              this.capabilities,
+            });
+
+            /// URL taken from the reference APK's string table.
+            static const String defaultUrl =
+                'wss://gateway.discord.gg/?v=10&encoding=json';
+
+            /// 4004 = authentication failed: retrying can't help.
+            static const Set<int> fatalCloseCodes = {4004};
+
+            /// Values sent in IDENTIFY `properties`.
+            static const Map<String, String> clientProperties = {
+              'os': 'Android',
+              'browser': 'Discord Android',
+              'device': 'Android',
+            };
+
+            final String token;
+            final DispatchHandler onDispatch;
+            final void Function(String) onLog;
+            final void Function(String) onFatal;
+
+            /// Optional IDENTIFY `capabilities` bitfield. The reference APK sends the
+            /// key but its value is UNKNOWN here, so it is omitted unless set.
+            final int? capabilities;
+
+            WebSocket? _ws;
+            Timer? _heartbeatTimer;
+            Timer? _reconnectTimer;
+            bool _stopped = true;
+            bool _connecting = false;
+            bool _ackReceived = true;
+            int _attempt = 0;
+            int? _seq;
+            String? _resumeUrl;
+            final Random _rng = Random();
+
+            String? sessionId;
+            String? username;
+            bool _ready = false;
+
+            /// True once READY/RESUMED arrived on the current socket.
+            bool get ready => _ready && sessionId != null;
+
+            Future<void> start() async {
+              _stopped = false;
+              await _connect();
+            }
+
+            Future<void> stop() async {
+              _stopped = true;
+              _heartbeatTimer?.cancel();
+              _reconnectTimer?.cancel();
+              final ws = _ws;
+              _ws = null;
+              _ready = false;
+              sessionId = null;
+              _resumeUrl = null;
+              _seq = null;
+              try {
+                await ws?.close(1000, 'bye');
+              } catch (_) {}
+              onLog('Gateway shut down.');
+            }
+
+            Future<void> _connect() async {
+              if (_stopped || _connecting) return;
+              _connecting = true;
+              final resuming = sessionId != null && _seq != null && _resumeUrl != null;
+              final url = resuming ? '$_resumeUrl/?v=10&encoding=json' : defaultUrl;
+              onLog('Connecting to Discord Gateway v10...');
+              try {
+                final ws = await WebSocket.connect(url).timeout(
+                  const Duration(seconds: 15),
+                );
+                if (_stopped) {
+                  await ws.close(1000);
+                  return;
+                }
+                _ws = ws;
+                ws.listen(
+                  (raw) => _onData(ws, raw),
+                  onDone: () => _onClosed(ws),
+                  onError: (Object e) {
+                    onLog('Gateway Socket Error: $e');
+                    _onClosed(ws);
+                  },
+                  cancelOnError: true,
+                );
+                onLog('Connected to Gateway WebSocket.');
+              } catch (e) {
+                onLog('Failed to connect to Gateway: $e');
+                _scheduleReconnect();
+              } finally {
+                _connecting = false;
+              }
+            }
+
+            void _send(Map<String, dynamic> payload) {
+              try {
+                _ws?.add(jsonEncode(payload));
+              } catch (e) {
+                onLog('Gateway send failed: $e');
+              }
+            }
+
+            Map<String, dynamic>? _decode(String raw) {
+              try {
+                final j = jsonDecode(raw);
+                return j is Map<String, dynamic> ? j : null;
+              } catch (_) {
+                return null;
+              }
+            }
+
+            void _onData(WebSocket ws, dynamic raw) {
+              if (!identical(ws, _ws)) return;
+              final sw = Stopwatch()..start();
+              if (raw is! String) return; // compression is off, so frames are text
+              final msg = _decode(raw);
+              if (msg == null) return;
+
+              final op = msg['op'];
+              final d = msg['d'];
+              switch (op) {
+                case 10: // HELLO
+                  if (d is Map && d['heartbeat_interval'] is int) {
+                    _startHeartbeat(d['heartbeat_interval'] as int);
+                  }
+                  if (sessionId != null && _seq != null) {
+                    onLog('Resuming session...');
+                    _send({
+                      'op': 6,
+                      'd': {'token': token, 'session_id': sessionId, 'seq': _seq},
+                    });
+                  } else {
+                    _identify();
+                  }
+                  break;
+                case 11: // HEARTBEAT_ACK
+                  _ackReceived = true;
+                  break;
+                case 1: // server asks for an immediate heartbeat
+                  _send({'op': 1, 'd': _seq});
+                  break;
+                case 7: // RECONNECT
+                  onLog('Discord server requested a reconnect.');
+                  ws.close(4000, 'reconnect requested');
+                  break;
+                case 9: // INVALID_SESSION
+                  onLog('Invalid Gateway session. Resetting...');
+                  final resumable = d == true;
+                  if (!resumable) {
+                    sessionId = null;
+                    _resumeUrl = null;
+                    _seq = null;
+                  }
+                  _ready = false;
+                  Future.delayed(Duration(milliseconds: 1000 + _rng.nextInt(4000)), () {
+                    if (_stopped || !identical(ws, _ws)) return;
+                    if (resumable && sessionId != null && _seq != null) {
+                      _send({
+                        'op': 6,
+                        'd': {'token': token, 'session_id': sessionId, 'seq': _seq},
+                      });
+                    } else {
+                      _identify();
+                    }
+                  });
+                  break;
+                case 0: // DISPATCH
+                  final s = msg['s'];
+                  if (s is int) _seq = s;
+                  final t = msg['t'];
+                  if (t is! String || d is! Map<String, dynamic>) {
+                    if (t == 'RESUMED') _markReady();
+                    return;
+                  }
+                  if (t == 'READY') {
+                    sessionId = d['session_id'] as String?;
+                    final r = d['resume_gateway_url'];
+                    if (r is String) _resumeUrl = r;
+                    final user = d['user'];
+                    if (user is Map) username = user['username']?.toString();
+                    _markReady();
+                    onLog('Gateway READY: Logged in as ${username ?? '?'}');
+                    return;
+                  }
+                  onDispatch(t, d, sw);
+                  break;
+              }
+            }
+
+            void _markReady() {
+              _ready = true;
+              _attempt = 0;
+            }
+
+            void _identify() {
+              final d = <String, dynamic>{
+                'token': token,
+                'properties': clientProperties,
+                'presence': {
+                  'status': 'online',
+                  'since': 0,
+                  'activities': <dynamic>[],
+                  'afk': false,
+                },
+                'compress': false,
+              };
+              if (capabilities != null) d['capabilities'] = capabilities;
+              _send({'op': 2, 'd': d});
+              onLog('Identify handshake sent.');
+            }
+
+            void _startHeartbeat(int intervalMs) {
+              _heartbeatTimer?.cancel();
+              _ackReceived = true;
+              final first = (intervalMs * _rng.nextDouble()).round();
+              _heartbeatTimer = Timer(Duration(milliseconds: first), () {
+                _beat(intervalMs);
+              });
+            }
+
+            void _beat(int intervalMs) {
+              final ws = _ws;
+              if (ws == null || _stopped) return;
+              if (!_ackReceived) {
+                onLog('Heartbeat ACK not received. Zombie connection detected, '
+                    'reconnecting...');
+                ws.close(4000, 'zombie connection');
+                return;
+              }
+              _ackReceived = false;
+              _send({'op': 1, 'd': _seq});
+              _heartbeatTimer = Timer(Duration(milliseconds: intervalMs), () {
+                _beat(intervalMs);
+              });
+            }
+
+            void _onClosed(WebSocket ws) {
+              if (!identical(ws, _ws)) return; // stale socket or already handled
+              _ws = null;
+              _ready = false;
+              _heartbeatTimer?.cancel();
+              final code = ws.closeCode;
+              if (_stopped) return;
+              if (code != null && fatalCloseCodes.contains(code)) {
+                _stopped = true;
+                onFatal('Gateway closed with $code: invalid Discord token.');
+                return;
+              }
+              // 4007 invalid seq, 4009 session timed out: session can't be resumed.
+              if (code == 4007 || code == 4009) {
+                sessionId = null;
+                _resumeUrl = null;
+                _seq = null;
+              }
+              onLog('Gateway socket closed (code ${code ?? '-'}). '
+                  'Scheduling reconnect...');
+              _scheduleReconnect();
+            }
+
+            void _scheduleReconnect() {
+              if (_stopped) return;
+              _reconnectTimer?.cancel();
+              final secs = min(30, 1 << min(_attempt, 5));
+              _attempt++;
+              _reconnectTimer = Timer(Duration(seconds: secs), _connect);
+            }
+          }
+          QSEOF
+          cat > lib/core/sniper_engine.dart <<'QSEOF'
+          import 'dart:async';
+          import 'dart:collection';
+
+          import 'button_matcher.dart';
+          import 'discord_rest.dart';
+          import 'gateway_client.dart';
+          import 'models.dart';
+
+          class SnipeResult {
+            const SnipeResult({
+              required this.label,
+              required this.latencyMs,
+              required this.guildId,
+              required this.channelId,
+            });
+            final String label;
+            final int latencyMs;
+            final String guildId;
+            final String channelId;
+          }
+
+          /// Ties Gateway + REST together: when a MESSAGE_CREATE/MESSAGE_UPDATE in a
+          /// configured guild/channel carries a matching button, it is clicked at once.
+          class SniperEngine {
+            SniperEngine({
+              required this.token,
+              required this.config,
+              required this.onLog,
+              required this.onSnipe,
+              required this.onFatal,
+            });
+
+            static const int maxAttemptsPerButton = 3;
+            static const int maxTrackedKeys = 500;
+
+            final String token;
+            final SniperConfig config;
+            final void Function(String) onLog;
+            final void Function(SnipeResult) onSnipe;
+            final void Function(String) onFatal;
+
+            late final DiscordRest _rest = DiscordRest(token);
+            GatewayClient? _gateway;
+            bool _running = false;
+
+            /// "messageId:customId" -> attempts so far; a value >= maxAttemptsPerButton
+            /// also marks a click that already succeeded. Insertion-ordered and bounded.
+            final LinkedHashMap<String, int> _attempts = LinkedHashMap();
+
+            bool get running => _running;
+
+            Future<void> start() async {
+              if (_running) return;
+              if (config.targets.isEmpty) {
+                onFatal('No queue configured.');
+                return;
+              }
+              _running = true;
+              try {
+                final name = await _rest.validateToken();
+                onLog('Token OK, account: $name');
+              } on StateError catch (e) {
+                _running = false;
+                onFatal(e.message);
+                return;
+              } catch (e) {
+                // Network hiccup: keep going, the gateway has its own reconnect loop.
+                onLog('Token check skipped: $e');
+              }
+              final gw = GatewayClient(
+                token: token,
+                onDispatch: _onDispatch,
+                onLog: onLog,
+                onFatal: (m) {
+                  _running = false;
+                  onFatal(m);
+                },
+              );
+              _gateway = gw;
+              await gw.start();
+              onLog('Watching ${config.targets.length} queue channel(s).');
+            }
+
+            Future<void> stop() async {
+              _running = false;
+              await _gateway?.stop();
+              _gateway = null;
+              _rest.close();
+            }
+
+            QueueTarget? _targetFor(String? guildId, String? channelId) {
+              if (guildId == null || channelId == null) return null;
+              for (final t in config.targets) {
+                if (t.guildId == guildId && t.channelId == channelId) return t;
+              }
+              return null;
+            }
+
+            void _onDispatch(String type, Map<String, dynamic> d, Stopwatch sw) {
+              if (!_running) return;
+              if (type != 'MESSAGE_CREATE' && type != 'MESSAGE_UPDATE') return;
+
+              final guildId = d['guild_id'];
+              final channelId = d['channel_id'];
+              final messageId = d['id'];
+              if (guildId is! String || channelId is! String || messageId is! String) {
+                return;
+              }
+              final target = _targetFor(guildId, channelId);
+              if (target == null) return;
+
+              // Partial MESSAGE_UPDATEs (embed unfurls etc.) have no components.
+              final components = d['components'];
+              if (components is! List || components.isEmpty) return;
+
+              final match = findButton(components, target);
+              if (match == null) return;
+
+              final key = '$messageId:${match.customId}';
+              final tries = _attempts[key] ?? 0;
+              if (tries >= maxAttemptsPerButton) return;
+
+              final flags = d['flags'];
+              final author = d['author'];
+              final appId = (d['application_id'] ??
+                      (author is Map ? author['id'] : null))
+                  ?.toString();
+              final sessionId = _gateway?.sessionId;
+              if (appId == null || appId.isEmpty) {
+                onLog('Button "${match.label}" found but message has no '
+                    'application id, skipped.');
+                return;
+              }
+              if (sessionId == null) {
+                onLog('Button "${match.label}" found but gateway session is not '
+                    'ready, skipped.');
+                return;
+              }
+
+              _attempts[key] = tries + 1;
+              while (_attempts.length > maxTrackedKeys) {
+                _attempts.remove(_attempts.keys.first);
+              }
+              onLog('Button detected: "${match.label}" ($type). Executing snip...');
+
+              unawaited(_click(
+                key: key,
+                target: target,
+                match: match,
+                body: buildInteractionBody(
+                  guildId: guildId,
+                  channelId: channelId,
+                  messageId: messageId,
+                  messageFlags: flags is int ? flags : 0,
+                  applicationId: appId,
+                  sessionId: sessionId,
+                  customId: match.customId,
+                ),
+                sw: sw,
+              ));
+            }
+
+            Future<void> _click({
+              required String key,
+              required QueueTarget target,
+              required ButtonMatch match,
+              required Map<String, dynamic> body,
+              required Stopwatch sw,
+            }) async {
+              try {
+                final r = await _rest.postInteraction(body);
+                final ms = sw.elapsedMilliseconds;
+                if (r.ok) {
+                  _attempts[key] = maxAttemptsPerButton; // done, never click again
+                  onLog('Successfully sniped queue button "${match.label}" '
+                      '(Latency: ${ms}ms)');
+                  onSnipe(SnipeResult(
+                    label: match.label,
+                    latencyMs: ms,
+                    guildId: target.guildId,
+                    channelId: target.channelId,
+                  ));
+                  unawaited(_relay(match.label, ms));
+                } else if (r.status == 401) {
+                  onLog('Interaction rejected: 401, token is no longer valid.');
+                  _running = false;
+                  onFatal('Invalid Discord token or unauthorized (401).');
+                } else {
+                  onLog('Button interaction failed (HTTP ${r.status}, possibly rate '
+                      'limited or queue full): ${_short(r.body)}');
+                }
+              } catch (e) {
+                onLog('Button interaction error: $e');
+              }
+            }
+
+            Future<void> _relay(String label, int ms) async {
+              final url = config.webhookUrl.trim();
+              if (url.isEmpty) return;
+              if (!isValidWebhookUrl(url)) {
+                onLog('Webhook URL ignored: not a Discord webhook URL.');
+                return;
+              }
+              try {
+                final r = await _rest.postWebhook(url, {
+                  'content': 'Successfully sniped queue button **"$label"** '
+                      '(Latency: ${ms}ms)',
+                });
+                if (!r.ok) onLog('Webhook relay failed: HTTP ${r.status}');
+              } catch (e) {
+                onLog('Webhook relay error: $e');
+              }
+            }
+
+            String _short(String s) => s.length <= 160 ? s : '${s.substring(0, 160)}...';
+          }
+          QSEOF
+          cat > lib/services/storage.dart <<'QSEOF'
+          import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+
+          import '../core/models.dart';
+
+          /// Token goes to the Android keystore-backed secure storage; the rest of the
+          /// config is plain preferences. Both the UI isolate and the background
+          /// service isolate use this class.
+          class Storage {
+            static const String _tokenKey = 'discord_token';
+            static const String _configKey = 'queue_sniper_config';
+
+            final FlutterSecureStorage _secure = const FlutterSecureStorage();
+
+            Future<String?> readToken() => _secure.read(key: _tokenKey);
+
+            Future<void> writeToken(String token) =>
+                _secure.write(key: _tokenKey, value: token);
+
+            Future<void> clearToken() => _secure.delete(key: _tokenKey);
+
+            Future<SniperConfig> loadConfig() async {
+              final p = await SharedPreferences.getInstance();
+              await p.reload(); // the other isolate may have written it
+              return SniperConfig.decode(p.getString(_configKey));
+            }
+
+            Future<void> saveConfig(SniperConfig c) async {
+              final p = await SharedPreferences.getInstance();
+              await p.setString(_configKey, c.encode());
+            }
+          }
+          QSEOF
+          cat > lib/services/notification_service.dart <<'QSEOF'
+          import 'package:audioplayers/audioplayers.dart';
+          import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+          const String kForegroundChannelId = 'qs_foreground';
+          const String kAlertChannelId = 'qs_alerts';
+          const int kForegroundNotificationId = 8811;
+          const int _kAlertNotificationId = 8812;
+
+          /// Notifications + sound, usable from both the UI and the service isolate.
+          class NotificationService {
+            NotificationService._();
+            static final NotificationService instance = NotificationService._();
+
+            final FlutterLocalNotificationsPlugin _plugin =
+                FlutterLocalNotificationsPlugin();
+            AudioPlayer? _player;
+            bool _inited = false;
+
+            Future<void> init({bool createChannels = false}) async {
+              if (!_inited) {
+                const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+                await _plugin.initialize(const InitializationSettings(android: android));
+                _inited = true;
+              }
+              if (createChannels) {
+                final impl = _plugin.resolvePlatformSpecificImplementation<
+                    AndroidFlutterLocalNotificationsPlugin>();
+                await impl?.createNotificationChannel(const AndroidNotificationChannel(
+                  kForegroundChannelId,
+                  'Sniper status',
+                  description: 'Keeps the sniper alive in the background',
+                  importance: Importance.low,
+                ));
+                await impl?.createNotificationChannel(const AndroidNotificationChannel(
+                  kAlertChannelId,
+                  'Snipe alerts',
+                  description: 'Pop-up when a queue button was clicked',
+                  importance: Importance.max,
+                  enableVibration: true,
+                ));
+              }
+            }
+
+            Future<bool> requestPermission() async {
+              final impl = _plugin.resolvePlatformSpecificImplementation<
+                  AndroidFlutterLocalNotificationsPlugin>();
+              return await impl?.requestNotificationsPermission() ?? false;
+            }
+
+            Future<void> showSnipe(String title, String body) async {
+              await _plugin.show(
+                _kAlertNotificationId,
+                title,
+                body,
+                const NotificationDetails(
+                  android: AndroidNotificationDetails(
+                    kAlertChannelId,
+                    'Snipe alerts',
+                    channelDescription: 'Pop-up when a queue button was clicked',
+                    importance: Importance.max,
+                    priority: Priority.high,
+                    playSound: false, // the bundled sound is played by playSnipeSound
+                    enableVibration: true,
+                  ),
+                ),
+              );
+            }
+
+            Future<void> playSnipeSound() async {
+              try {
+                _player ??= AudioPlayer();
+                await _player!.play(AssetSource('sounds/snipe.wav'));
+              } catch (_) {
+                // Sound is best-effort and must never break the sniper loop.
+              }
+            }
+          }
+          QSEOF
+          cat > lib/services/sniper_service.dart <<'QSEOF'
+          import 'dart:async';
+          import 'dart:ui';
+
+          import 'package:flutter_background_service/flutter_background_service.dart';
+          import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+
+          import '../core/sniper_engine.dart';
+          import 'notification_service.dart';
+          import 'storage.dart';
+
+          /// Events sent from the service isolate to the UI via service.invoke():
+          ///   'log'     {line}
+          ///   'snipe'   {label, latency}
+          ///   'stopped' {reason}
+          Future<void> configureSniperService() async {
+            await NotificationService.instance.init(createChannels: true);
+            await FlutterBackgroundService().configure(
+              androidConfiguration: AndroidConfiguration(
+                onStart: onSniperServiceStart,
+                autoStart: false,
+                isForegroundMode: true,
+                notificationChannelId: kForegroundChannelId,
+                initialNotificationTitle: 'Queue Sniper',
+                initialNotificationContent: 'Starting...',
+                foregroundServiceNotificationId: kForegroundNotificationId,
+                foregroundServiceTypes: [AndroidForegroundType.specialUse],
+              ),
+              iosConfiguration: IosConfiguration(autoStart: false),
+            );
+          }
+
+          String _stamp() {
+            final n = DateTime.now();
+            String two(int v) => v.toString().padLeft(2, '0');
+            return '${two(n.hour)}:${two(n.minute)}:${two(n.second)}';
+          }
+
+          /// Entry point of the background isolate.
+          @pragma('vm:entry-point')
+          Future<void> onSniperServiceStart(ServiceInstance service) async {
+            DartPluginRegistrant.ensureInitialized();
+
+            void log(String line) => service.invoke('log', {'line': '[${_stamp()}] $line'});
+
+            void status(String text) {
+              if (service is AndroidServiceInstance) {
+                service.setForegroundNotificationInfo(
+                  title: 'Queue Sniper',
+                  content: text,
+                );
+              }
+            }
+
+            final storage = Storage();
+            final token = await storage.readToken();
+            final config = await storage.loadConfig();
+            await NotificationService.instance.init();
+
+            if (token == null || token.isEmpty) {
+              log('No token saved. Stopping.');
+              service.invoke('stopped', {'reason': 'no token'});
+              await service.stopSelf();
+              return;
+            }
+
+            var snipes = 0;
+            SniperEngine? engine;
+
+            Future<void> shutdown(String reason) async {
+              await engine?.stop();
+              service.invoke('stopped', {'reason': reason});
+              await service.stopSelf();
+            }
+
+            engine = SniperEngine(
+              token: token,
+              config: config,
+              onLog: log,
+              onFatal: (m) {
+                log('FATAL: $m');
+                unawaited(shutdown(m));
+              },
+              onSnipe: (r) {
+                snipes++;
+                status('Watching queues. Snipes: $snipes');
+                service.invoke('snipe', {'label': r.label, 'latency': r.latencyMs});
+                if (config.soundEnabled) {
+                  unawaited(NotificationService.instance.playSnipeSound());
+                }
+                if (config.notifyEnabled) {
+                  unawaited(NotificationService.instance.showSnipe(
+                    'Queue button clicked',
+                    '"${r.label}" in ${r.latencyMs} ms',
+                  ));
+                }
+              },
+            );
+
+            service.on('stop').listen((_) {
+              unawaited(shutdown('stopped by user'));
+            });
+
+            status('Connecting...');
+            await engine.start();
+            if (engine.running) status('Watching queues. Snipes: 0');
+          }
+          QSEOF
+          cat > android/app/src/main/AndroidManifest.xml <<'QSEOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+              <application
+                  android:label="Queue Sniper"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher"
+                  android:usesCleartextTraffic="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:taskAffinity=""
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                          android:name="io.flutter.embedding.android.NormalTheme"
+                          android:resource="@style/NormalTheme" />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name="id.flutter.flutter_background_service.BackgroundService"
+                      android:exported="true"
+                      android:foregroundServiceType="specialUse"
+                      tools:replace="android:exported,android:foregroundServiceType">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Keeps a Discord gateway connection open to react to queue messages" />
+                  </service>
+
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.PROCESS_TEXT" />
+                      <data android:mimeType="text/plain" />
+                  </intent>
+              </queries>
+          </manifest>
+          QSEOF
+          cat > android/app/build.gradle.kts <<'QSEOF'
+          plugins {
+              id("com.android.application")
+              id("kotlin-android")
+              // The Flutter Gradle Plugin must be applied after the Android and Kotlin plugins.
+              id("dev.flutter.flutter-gradle-plugin")
+          }
+
+          android {
+              // Must match the package of the generated MainActivity:
+              // flutter create --org com.queuesniper --project-name queue_sniper
+              namespace = "com.queuesniper.queue_sniper"
+              compileSdk = flutter.compileSdkVersion
+              ndkVersion = flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_11
+                  targetCompatibility = JavaVersion.VERSION_11
+                  // Required by flutter_local_notifications.
+                  isCoreLibraryDesugaringEnabled = true
+              }
+
+              kotlinOptions {
+                  jvmTarget = JavaVersion.VERSION_11.toString()
+              }
+
+              defaultConfig {
+                  applicationId = "com.queuesniper.queue_sniper"
+                  // flutter_secure_storage 9.x needs 23+.
+                  minSdk = 24
+                  targetSdk = flutter.targetSdkVersion
+                  versionCode = flutter.versionCode
+                  versionName = flutter.versionName
+              }
+
+              buildTypes {
+                  release {
+                      // Debug-signed so `flutter build apk --release` works out of the box.
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+
+          dependencies {
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+          }
+          QSEOF
+          cat > test/core_test.dart <<'QSEOF'
+          import 'package:flutter_test/flutter_test.dart';
+          import 'package:queue_sniper/core/button_matcher.dart';
+          import 'package:queue_sniper/core/models.dart';
+
+          Map<String, dynamic> _btn(String id, String label,
+                  {int style = 1, bool disabled = false}) =>
+              {
+                'type': 2,
+                'custom_id': id,
+                'label': label,
+                'style': style,
+                'disabled': disabled,
+              };
+
+          List<Map<String, dynamic>> _row(List<Map<String, dynamic>> buttons) => [
+                {'type': 1, 'components': buttons},
+              ];
+
+          void main() {
+            const g = '111111111111111111';
+            const c = '222222222222222222';
+
+            group('findButton', () {
+              test('exact custom id wins over keywords', () {
+                const t = QueueTarget(guildId: g, channelId: c, customButtonId: 'q_join');
+                final m = findButton(
+                  _row([_btn('other', 'Join queue'), _btn('q_join', 'Go')]),
+                  t,
+                );
+                expect(m?.customId, 'q_join');
+              });
+
+              test('custom id set but absent -> null (no keyword fallback)', () {
+                const t = QueueTarget(guildId: g, channelId: c, customButtonId: 'nope');
+                expect(findButton(_row([_btn('a', 'Join queue')]), t), isNull);
+              });
+
+              test('keyword match is case-insensitive on label', () {
+                const t = QueueTarget(guildId: g, channelId: c);
+                final m = findButton(_row([_btn('x1', 'Leave'), _btn('x2', 'JOIN')]), t);
+                expect(m?.customId, 'x2');
+              });
+
+              test('skips disabled and link buttons', () {
+                const t = QueueTarget(guildId: g, channelId: c);
+                final m = findButton(
+                  _row([
+                    _btn('a', 'Join', disabled: true),
+                    _btn('b', 'Join', style: 5),
+                    _btn('c', 'Join'),
+                  ]),
+                  t,
+                );
+                expect(m?.customId, 'c');
+              });
+
+              test('empty keywords -> first clickable button', () {
+                const t = QueueTarget(guildId: g, channelId: c, keywords: []);
+                expect(findButton(_row([_btn('first', 'Whatever')]), t)?.customId,
+                    'first');
+              });
+
+              test('finds buttons nested in container/section layouts', () {
+                const t = QueueTarget(guildId: g, channelId: c);
+                final comps = [
+                  {
+                    'type': 17,
+                    'components': [
+                      {
+                        'type': 9,
+                        'components': [
+                          {'type': 10, 'content': 'text'}
+                        ],
+                        'accessory': _btn('deep', 'Join'),
+                      }
+                    ],
+                  }
+                ];
+                expect(findButton(comps, t)?.customId, 'deep');
+              });
+
+              test('keyword mode never picks a leave/cancel button', () {
+                const t = QueueTarget(guildId: g, channelId: c);
+                final m = findButton(
+                  _row([_btn('leave_queue', 'Leave Queue'), _btn('go', 'Join Queue')]),
+                  t,
+                );
+                expect(m?.customId, 'go');
+              });
+
+              test('no match -> null', () {
+                const t = QueueTarget(guildId: g, channelId: c);
+                expect(findButton(_row([_btn('a', 'Leave')]), t), isNull);
+                expect(findButton(null, t), isNull);
+              });
+            });
+
+            group('nonce and body', () {
+              test('nonce is the discord snowflake of the timestamp', () {
+                expect(generateNonce(nowMs: discordEpochMs + 1), '4194304');
+              });
+
+              test('interaction body carries the click fields', () {
+                final b = buildInteractionBody(
+                  guildId: g,
+                  channelId: c,
+                  messageId: '3',
+                  messageFlags: 0,
+                  applicationId: '4',
+                  sessionId: 's',
+                  customId: 'q',
+                  nonce: 'n',
+                );
+                expect(b['type'], 3);
+                expect(b['data'], {'component_type': 2, 'custom_id': 'q'});
+                expect(b['session_id'], 's');
+              });
+            });
+
+            group('models', () {
+              test('snowflake and webhook validation', () {
+                expect(isSnowflake('123456789012345678'), isTrue);
+                expect(isSnowflake('abc'), isFalse);
+                expect(
+                    isValidWebhookUrl('https://discord.com/api/webhooks/1/abc'), isTrue);
+                expect(isValidWebhookUrl('https://evil.example/api/webhooks/1/abc'),
+                    isFalse);
+                expect(isValidWebhookUrl('http://discord.com/api/webhooks/1/abc'),
+                    isFalse);
+              });
+
+              test('config round-trips and survives garbage', () {
+                const cfg = SniperConfig(
+                  targets: [QueueTarget(guildId: g, channelId: c, customButtonId: 'b')],
+                  webhookUrl: 'https://discord.com/api/webhooks/1/abc',
+                  soundEnabled: false,
+                );
+                final back = SniperConfig.decode(cfg.encode());
+                expect(back.targets.single.customButtonId, 'b');
+                expect(back.soundEnabled, isFalse);
+                expect(SniperConfig.decode('not json').targets, isEmpty);
+              });
+            });
+          }
+          QSEOF
+          python3 - <<'QSEOF'
+          import wave, struct, math
+          sr = 22050
+          frames = []
+          for freq, dur in ((880, 0.12), (1320, 0.18)):
+              n = int(sr * dur)
+              for i in range(n):
+                  env = min(1, i / 200) * min(1, (n - i) / 400)
+                  frames.append(int(32767 * 0.5 * env * math.sin(2 * math.pi * freq * i / sr)))
+          with wave.open('assets/sounds/snipe.wav', 'wb') as w:
+              w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+              w.writeframes(b''.join(struct.pack('<h', s) for s in frames))
+          QSEOF
+
+      - name: Test (non-blocking)
+        working-directory: queue_sniper
+        continue-on-error: true
+        run: |
+          flutter pub get
+          flutter test
+
+      - name: Build APK
+        working-directory: queue_sniper
+        run: |
+          flutter pub get
+          flutter build apk --release
+
+      - name: Show build outputs
+        run: find queue_sniper/build/app/outputs -name '*.apk'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: queue-sniper-apk
+          path: queue_sniper/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Publish APK to Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "build-${{ github.run_number }}" \
+            queue_sniper/build/app/outputs/flutter-apk/app-release.apk \
+            --repo "${{ github.repository }}" \
+            --title "Build ${{ github.run_number }}" \
+            --notes "Debug-signed release APK"
