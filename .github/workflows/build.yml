@@ -31,469 +31,178 @@ jobs:
         run: |
           set -e
           rm -f test/widget_test.dart android/app/build.gradle
-          mkdir -p lib/core lib/services lib/app assets/sounds test android/app/src/main
-          cat > pubspec.yaml <<'QSEOF'
-          name: queue_sniper
-          description: Discord queue-button sniper for Android (Gateway listener + interaction click).
-          publish_to: 'none'
-          version: 1.0.0+1
-
-          environment:
-            sdk: '>=3.3.0 <4.0.0'
-
-          dependencies:
-            flutter:
-              sdk: flutter
-            flutter_background_service: ^5.0.5
-            flutter_local_notifications: ^17.2.2
-            audioplayers: ^6.0.0
-            flutter_secure_storage: ^9.2.2
-            shared_preferences: ^2.2.3
-            webview_flutter: ^4.9.0
-
-          dev_dependencies:
-            flutter_test:
-              sdk: flutter
-            flutter_lints: ^4.0.0
-
-          flutter:
-            uses-material-design: true
-            assets:
-              - assets/sounds/
-          QSEOF
-          cat > lib/main.dart <<'QSEOF'
-          import 'package:flutter/material.dart';
-
-          import 'app/home_page.dart';
-          import 'services/sniper_service.dart';
-
-          Future<void> main() async {
-            WidgetsFlutterBinding.ensureInitialized();
-            await configureSniperService();
-            runApp(const QueueSniperApp());
-          }
-
-          class QueueSniperApp extends StatelessWidget {
-            const QueueSniperApp({super.key});
-
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: 'Queue Sniper',
-                debugShowCheckedModeBanner: false,
-                theme: ThemeData(
-                  useMaterial3: true,
-                  brightness: Brightness.dark,
-                  colorSchemeSeed: const Color(0xFF3DDC84),
-                ),
-                home: const HomePage(),
-              );
-            }
-          }
-          QSEOF
-          cat > lib/app/home_page.dart <<'QSEOF'
-          import 'dart:async';
-
-          import 'package:flutter/material.dart';
-          import 'package:flutter_background_service/flutter_background_service.dart';
-
-          import '../core/discord_rest.dart';
-          import '../core/models.dart';
-          import '../services/notification_service.dart';
-          import '../services/storage.dart';
-          import 'web_login_page.dart';
-
-          class HomePage extends StatefulWidget {
-            const HomePage({super.key});
-
-            @override
-            State<HomePage> createState() => _HomePageState();
-          }
-
-          class _HomePageState extends State<HomePage> {
-            static const int _maxLogLines = 400;
-
-            final Storage _storage = Storage();
-            final FlutterBackgroundService _service = FlutterBackgroundService();
-            final TextEditingController _webhookCtl = TextEditingController();
-            final TextEditingController _spamCountCtl = TextEditingController();
-            final TextEditingController _spamIntervalCtl = TextEditingController();
-            final TextEditingController _pollCtl = TextEditingController();
-            final List<String> _log = [];
-
-            List<Profile> _profiles = const [];
-            String? _selectedId;
-            bool _running = false;
-            int _snipes = 0;
-            StreamSubscription<Map<String, dynamic>?>? _logSub;
-            StreamSubscription<Map<String, dynamic>?>? _snipeSub;
-            StreamSubscription<Map<String, dynamic>?>? _stoppedSub;
-
-            Profile? get _sel {
-              for (final p in _profiles) {
-                if (p.id == _selectedId) return p;
-              }
-              return null;
-            }
-
-            @override
-            void initState() {
-              super.initState();
-              _init();
-            }
-
-            Future<void> _init() async {
-              final profiles = await _storage.loadProfiles();
-              final running = await _service.isRunning();
-              if (!mounted) return;
-              setState(() {
-                _profiles = profiles;
-                _selectedId = profiles.isEmpty ? null : profiles.first.id;
-                _running = running;
-              });
-              _syncControllers();
-              _logSub = _service.on('log').listen((e) {
-                final line = e?['line'];
-                if (line is! String || !mounted) return;
-                setState(() {
-                  _log.add(line);
-                  if (_log.length > _maxLogLines) _log.removeAt(0);
-                });
-              });
-              _snipeSub = _service.on('snipe').listen((_) {
-                if (mounted) setState(() => _snipes++);
-              });
-              _stoppedSub = _service.on('stopped').listen((_) {
-                if (mounted) setState(() => _running = false);
-              });
-            }
-
-            @override
-            void dispose() {
-              _logSub?.cancel();
-              _snipeSub?.cancel();
-              _stoppedSub?.cancel();
-              _webhookCtl.dispose();
-              _spamCountCtl.dispose();
-              _spamIntervalCtl.dispose();
-              _pollCtl.dispose();
-              super.dispose();
-            }
-
-            void _toast(String msg) {
-              ScaffoldMessenger.of(context)
-                ..hideCurrentSnackBar()
-                ..showSnackBar(SnackBar(content: Text(msg)));
-            }
-
-            /// Copies the selected profile's settings into the text fields.
-            void _syncControllers() {
-              final c = _sel?.config;
-              _webhookCtl.text = c?.webhookUrl ?? '';
-              _spamCountCtl.text = (c?.spamCount ?? 10).toString();
-              _spamIntervalCtl.text = (c?.spamIntervalMs ?? 0).toString();
-              _pollCtl.text = (c?.pollSeconds ?? 0).toString();
-            }
-
-            Future<void> _updateSel(Profile Function(Profile) change) async {
-              final sel = _sel;
-              if (sel == null) return;
-              final list = [for (final p in _profiles) p.id == sel.id ? change(p) : p];
-              setState(() => _profiles = list);
-              await _storage.saveProfiles(list);
-            }
-
-            Future<void> _updateConfig(SniperConfig Function(SniperConfig) change) =>
-                _updateSel((p) => p.copyWith(config: change(p.config)));
-
-            // ---- profiles ----------------------------------------------------------
-
-            /// Returns the account name, '' if it could not be read (offline), or null
-            /// if Discord rejected the token.
-            Future<String?> _checkToken(String token) async {
-              final rest = DiscordRest(token);
-              try {
-                return await rest.validateToken();
-              } on StateError catch (e) {
-                _toast(e.message);
-                return null;
-              } catch (_) {
-                return '';
-              } finally {
-                rest.close();
-              }
-            }
-
-            Future<void> _addProfile() async {
-              final r = await showDialog<_ProfileResult>(
-                context: context,
-                builder: (_) => const _ProfileDialog(
-                  title: 'New profile',
-                  requireToken: true,
-                ),
-              );
-              if (r == null || r.token == null) return;
-              _toast('Checking token...');
-              final name = await _checkToken(r.token!);
-              if (name == null) return;
-              final id = Storage.newId();
-              final profile = Profile(id: id, label: r.label, username: name);
-              await _storage.writeToken(id, r.token!);
-              final list = [..._profiles, profile];
-              await _storage.saveProfiles(list);
-              if (!mounted) return;
-              setState(() {
-                _profiles = list;
-                _selectedId = id;
-              });
-              _syncControllers();
-              _toast(name.isEmpty
-                  ? 'Profile added.'
-                  : 'Profile added: @$name. Token saved to the keystore.');
-            }
-
-            Future<void> _editProfile() async {
-              final sel = _sel;
-              if (sel == null) return;
-              final r = await showDialog<_ProfileResult>(
-                context: context,
-                builder: (_) => _ProfileDialog(
-                  title: 'Edit profile',
-                  initialLabel: sel.label,
-                  requireToken: false,
-                ),
-              );
-              if (r == null) return;
-              var username = sel.username;
-              if (r.token != null) {
-                _toast('Checking token...');
-                final name = await _checkToken(r.token!);
-                if (name == null) return;
-                await _storage.writeToken(sel.id, r.token!);
-                username = name;
-              }
-              await _updateSel((p) => p.copyWith(label: r.label, username: username));
-            }
-
-            Future<void> _removeProfile() async {
-              final sel = _sel;
-              if (sel == null) return;
-              final ok = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: Text('Remove "${sel.label}"?'),
-                  content: const Text('Its token and settings are deleted from this phone.'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('CANCEL'),
-                    ),
-                    FilledButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      child: const Text('REMOVE'),
-                    ),
-                  ],
-                ),
-              );
-              if (ok != true) return;
-              await _storage.deleteToken(sel.id);
-              final list = _profiles.where((p) => p.id != sel.id).toList();
-              await _storage.saveProfiles(list);
-              if (!mounted) return;
-              setState(() {
-                _profiles = list;
-                _selectedId = list.isEmpty ? null : list.first.id;
-              });
-              _syncControllers();
-            }
-
-            // ---- settings of the selected profile ----------------------------------
-
-            Future<void> _addTarget() async {
-              final t = await showDialog<QueueTarget>(
-                context: context,
-                builder: (_) => const _TargetDialog(),
-              );
-              if (t == null) return;
-              await _updateConfig((c) => c.copyWith(targets: [...c.targets, t]));
-            }
-
-            Future<void> _removeTarget(int i) => _updateConfig((c) {
-                  final list = [...c.targets]..removeAt(i);
-                  return c.copyWith(targets: list);
-                });
-
-            Future<void> _applyWebhook() async {
-              final url = _webhookCtl.text.trim();
-              if (url.isNotEmpty && !isValidWebhookUrl(url)) {
-                _toast('Not a Discord webhook URL (https://discord.com/api/webhooks/...).');
-                return;
-              }
-              await _updateConfig((c) => c.copyWith(webhookUrl: url));
-              _toast(url.isEmpty ? 'Webhook cleared.' : 'Webhook applied.');
-            }
-
-            // ---- engine ------------------------------------------------------------
-
-            List<Profile> get _runnable => _profiles
-                .where((p) => p.enabled && p.config.targets.isNotEmpty)
-                .toList();
-
-            Future<void> _toggleEngine() async {
-              if (_running) {
-                _service.invoke('stop');
-                return;
-              }
-              if (_profiles.isEmpty) {
-                _toast('Add a profile first.');
-                return;
-              }
-              if (_runnable.isEmpty) {
-                _toast('Enable a profile that has at least one queue channel.');
-                return;
-              }
-              await _storage.saveProfiles(_profiles);
-              await NotificationService.instance.requestPermission();
-              final started = await _service.startService();
-              if (!mounted) return;
-              setState(() {
-                _running = started;
-                _snipes = 0;
-              });
-              if (!started) _toast('Service did not start.');
-            }
-
-            // ---- UI ----------------------------------------------------------------
-
-            @override
-            Widget build(BuildContext context) {
-              final scheme = Theme.of(context).colorScheme;
-              final sel = _sel;
-              final cfg = sel?.config;
-              return Scaffold(
-                appBar: AppBar(title: const Text('Queue Sniper')),
-                body: ListView(
-                  padding: const EdgeInsets.all(16),
-                  children: [
-                    _card(
-                      title: 'ENGINE',
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _running
-                                ? 'RUNNING  |  snipes this run: $_snipes'
-                                : 'STOPPED',
-                            style: TextStyle(
-                              color: _running ? scheme.primary : scheme.outline,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          if (_runnable.isEmpty)
-                            const Text('No profile ready to run.')
-                          else
-                            for (final p in _runnable) Text('• ${p.display}'),
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton.icon(
-                              onPressed: _toggleEngine,
-                              icon: Icon(_running ? Icons.stop : Icons.bolt),
-                              label: Text(
-                                _running ? 'HALT SNIPER ENGINE' : 'ENGAGE SNIPER',
-                              ),
-                            ),
-                          ),
-                          if (_running)
-                            const Padding(
-                              padding: EdgeInsets.only(top: 8),
-                              child: Text(
-                                'Stop and start again to apply changes.',
-                                style: TextStyle(fontSize: 12),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    _card(
-                      title: 'PROFILES (${_profiles.length})',
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (_profiles.isEmpty)
-                            const Padding(
-                              padding: EdgeInsets.only(bottom: 8),
-                              child: Text('No profile yet. Add one with a Discord account.'),
-                            ),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 4,
-                            children: [
-                              for (final p in _profiles)
-                                ChoiceChip(
-                                  label: Text(p.label),
-                                  avatar: Icon(
-                                    p.enabled ? Icons.check_circle : Icons.pause_circle,
-                                    size: 18,
-                                  ),
-                                  selected: p.id == _selectedId,
-                                  onSelected: (_) {
-                                    setState(() => _selectedId = p.id);
-                                    _syncControllers();
-                                  },
-                                ),
-                            ],
-                          ),
-                          if (sel != null) ...[
-                            const SizedBox(height: 12),
-                            Text(
-                              sel.username.isEmpty
-                                  ? 'Account: unknown'
-                                  : 'Account: @${sel.username}',
-                              style: const TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            SwitchListTile(
-                              contentPadding: EdgeInsets.zero,
-                              title: const Text('Include when engine runs'),
-                              value: sel.enabled,
-                              onChanged: _running
-                                  ? null
-                                  : (v) => _updateSel((p) => p.copyWith(enabled: v)),
-                            ),
-                            Row(
-                              children: [
-                                OutlinedButton(
-                                  onPressed: _running ? null : _editProfile,
-                                  child: const Text('RENAME / NEW TOKEN'),
-                                ),
-                                const SizedBox(width: 8),
-                                OutlinedButton(
-                                  onPressed: _running ? null : _removeProfile,
-                                  child: const Text('REMOVE'),
-                                ),
-                              ],
-                            ),
-                          ],
-                          const SizedBox(height: 8),
-                          FilledButton.icon(
-                            onPressed: _running ? null : _addProfile,
-                            icon: const Icon(Icons.person_add),
-                            label: const Text('ADD PROFILE'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (sel != null && cfg != null) ...[
-                      _card(
-                        title: 'QUEUE CHANNELS (${cfg.targets.length})  |  ${sel.label}',
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            for (var i = 0; i < cfg.targets.length; i++)
-                              ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                title: Text('GUILD ${cfg.targets[i].guildId}'),
-                                subtitle: Text(
-                                  'channel ${cfg.targets[i].channelId}\n'
-                                  '${cfg.targets[i].customButtonId.isNotEmpty ? 'button id: ${cfg.targets[i].customButtonId}' : 'keywords: ${cfg.targets[i].keywords.isEmpty ? '(any button)'
+          mkdir -p assets/sounds
+          base64 -d <<'QSEOF' | tar xz
+          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
+          H9/ZFX
