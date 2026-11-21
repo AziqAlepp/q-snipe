@@ -1,0 +1,497 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+# Self-contained: every project file is written by the "Write sources" step,
+# so this single file is all the repo needs.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android scaffolding
+        run: flutter create --org com.queuesniper --project-name queue_sniper --platforms android queue_sniper
+
+      - name: Write sources
+        working-directory: queue_sniper
+        run: |
+          set -e
+          rm -f test/widget_test.dart android/app/build.gradle
+          mkdir -p lib/core lib/services lib/app assets/sounds test android/app/src/main
+
+          cat > pubspec.yaml <<'QSEOF'
+          name: queue_sniper
+          description: Discord queue-button sniper for Android (Gateway listener + interaction click).
+          publish_to: 'none'
+          version: 1.0.0+1
+
+          environment:
+            sdk: '>=3.3.0 <4.0.0'
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            flutter_background_service: ^5.0.5
+            flutter_local_notifications: ^17.2.2
+            audioplayers: ^6.0.0
+            flutter_secure_storage: ^9.2.2
+            shared_preferences: ^2.2.3
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^4.0.0
+
+          flutter:
+            uses-material-design: true
+            assets:
+              - assets/sounds/
+          QSEOF
+          cat > lib/main.dart <<'QSEOF'
+          import 'package:flutter/material.dart';
+
+          import 'app/home_page.dart';
+          import 'services/sniper_service.dart';
+
+          Future<void> main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            await configureSniperService();
+            runApp(const QueueSniperApp());
+          }
+
+          class QueueSniperApp extends StatelessWidget {
+            const QueueSniperApp({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'Queue Sniper',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  useMaterial3: true,
+                  brightness: Brightness.dark,
+                  colorSchemeSeed: const Color(0xFF3DDC84),
+                ),
+                home: const HomePage(),
+              );
+            }
+          }
+          QSEOF
+          cat > lib/app/home_page.dart <<'QSEOF'
+          import 'dart:async';
+
+          import 'package:flutter/material.dart';
+          import 'package:flutter_background_service/flutter_background_service.dart';
+
+          import '../core/models.dart';
+          import '../services/notification_service.dart';
+          import '../services/storage.dart';
+
+          class HomePage extends StatefulWidget {
+            const HomePage({super.key});
+
+            @override
+            State<HomePage> createState() => _HomePageState();
+          }
+
+          class _HomePageState extends State<HomePage> {
+            static const int _maxLogLines = 300;
+
+            final Storage _storage = Storage();
+            final FlutterBackgroundService _service = FlutterBackgroundService();
+            final TextEditingController _tokenCtl = TextEditingController();
+            final TextEditingController _webhookCtl = TextEditingController();
+            final List<String> _log = [];
+
+            SniperConfig _config = const SniperConfig();
+            bool _hasToken = false;
+            bool _running = false;
+            bool _tokenVisible = false;
+            int _snipes = 0;
+            StreamSubscription<Map<String, dynamic>?>? _logSub;
+            StreamSubscription<Map<String, dynamic>?>? _snipeSub;
+            StreamSubscription<Map<String, dynamic>?>? _stoppedSub;
+
+            @override
+            void initState() {
+              super.initState();
+              _init();
+            }
+
+            Future<void> _init() async {
+              final token = await _storage.readToken();
+              final cfg = await _storage.loadConfig();
+              final running = await _service.isRunning();
+              if (!mounted) return;
+              setState(() {
+                _hasToken = token != null && token.isNotEmpty;
+                _config = cfg;
+                _webhookCtl.text = cfg.webhookUrl;
+                _running = running;
+              });
+              _logSub = _service.on('log').listen((e) {
+                final line = e?['line'];
+                if (line is! String || !mounted) return;
+                setState(() {
+                  _log.add(line);
+                  if (_log.length > _maxLogLines) _log.removeAt(0);
+                });
+              });
+              _snipeSub = _service.on('snipe').listen((_) {
+                if (mounted) setState(() => _snipes++);
+              });
+              _stoppedSub = _service.on('stopped').listen((_) {
+                if (mounted) setState(() => _running = false);
+              });
+            }
+
+            @override
+            void dispose() {
+              _logSub?.cancel();
+              _snipeSub?.cancel();
+              _stoppedSub?.cancel();
+              _tokenCtl.dispose();
+              _webhookCtl.dispose();
+              super.dispose();
+            }
+
+            void _toast(String msg) {
+              ScaffoldMessenger.of(context)
+                ..hideCurrentSnackBar()
+                ..showSnackBar(SnackBar(content: Text(msg)));
+            }
+
+            // ---- token -------------------------------------------------------------
+
+            Future<void> _saveToken() async {
+              var t = _tokenCtl.text.trim();
+              if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+                t = t.substring(1, t.length - 1);
+              }
+              if (t.length < 20 || RegExp(r'\s').hasMatch(t)) {
+                _toast('That does not look like a Discord token.');
+                return;
+              }
+              await _storage.writeToken(t);
+              _tokenCtl.clear();
+              if (!mounted) return;
+              setState(() => _hasToken = true);
+              _toast('Token saved to the secure keystore.');
+            }
+
+            Future<void> _clearToken() async {
+              await _storage.clearToken();
+              if (!mounted) return;
+              setState(() => _hasToken = false);
+            }
+
+            // ---- config ------------------------------------------------------------
+
+            Future<void> _updateConfig(SniperConfig c) async {
+              setState(() => _config = c);
+              await _storage.saveConfig(c);
+            }
+
+            Future<void> _addTarget() async {
+              final t = await showDialog<QueueTarget>(
+                context: context,
+                builder: (_) => const _TargetDialog(),
+              );
+              if (t == null) return;
+              await _updateConfig(_config.copyWith(targets: [..._config.targets, t]));
+            }
+
+            Future<void> _removeTarget(int i) async {
+              final list = [..._config.targets]..removeAt(i);
+              await _updateConfig(_config.copyWith(targets: list));
+            }
+
+            Future<void> _applyWebhook() async {
+              final url = _webhookCtl.text.trim();
+              if (url.isNotEmpty && !isValidWebhookUrl(url)) {
+                _toast('Not a Discord webhook URL (https://discord.com/api/webhooks/...).');
+                return;
+              }
+              await _updateConfig(_config.copyWith(webhookUrl: url));
+              _toast(url.isEmpty ? 'Webhook cleared.' : 'Webhook applied.');
+            }
+
+            // ---- engine ------------------------------------------------------------
+
+            Future<void> _toggleEngine() async {
+              if (_running) {
+                _service.invoke('stop');
+                return;
+              }
+              if (!_hasToken) {
+                _toast('Save your Discord token first.');
+                return;
+              }
+              if (_config.targets.isEmpty) {
+                _toast('Add at least one queue channel.');
+                return;
+              }
+              await _storage.saveConfig(_config);
+              await NotificationService.instance.requestPermission();
+              final started = await _service.startService();
+              if (!mounted) return;
+              setState(() {
+                _running = started;
+                _snipes = 0;
+              });
+              if (!started) _toast('Service did not start.');
+            }
+
+            // ---- UI ----------------------------------------------------------------
+
+            @override
+            Widget build(BuildContext context) {
+              final scheme = Theme.of(context).colorScheme;
+              return Scaffold(
+                appBar: AppBar(title: const Text('Queue Sniper')),
+                body: ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    _card(
+                      title: 'ENGINE',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _running
+                                ? 'RUNNING  |  snipes this run: $_snipes'
+                                : 'STOPPED',
+                            style: TextStyle(
+                              color: _running ? scheme.primary : scheme.outline,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: _toggleEngine,
+                              icon: Icon(_running ? Icons.stop : Icons.bolt),
+                              label: Text(_running ? 'HALT SNIPER ENGINE' : 'ENGAGE SNIPER'),
+                            ),
+                          ),
+                          if (_running)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 8),
+                              child: Text(
+                                'Stop and start again to apply config changes.',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    _card(
+                      title: 'DISCORD TOKEN',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(_hasToken ? 'Token stored in keystore.' : 'No token saved.'),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _tokenCtl,
+                            obscureText: !_tokenVisible,
+                            enabled: !_running,
+                            decoration: InputDecoration(
+                              labelText: _hasToken ? 'New token (replaces current)' : 'Token',
+                              border: const OutlineInputBorder(),
+                              suffixIcon: IconButton(
+                                icon: Icon(
+                                  _tokenVisible ? Icons.visibility_off : Icons.visibility,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _tokenVisible = !_tokenVisible),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              FilledButton(
+                                onPressed: _running ? null : _saveToken,
+                                child: const Text('SAVE TOKEN'),
+                              ),
+                              const SizedBox(width: 8),
+                              OutlinedButton(
+                                onPressed: (_running || !_hasToken) ? null : _clearToken,
+                                child: const Text('REMOVE'),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'How to get it: Discord Web in a browser > DevTools > '
+                            'Network tab > any request > copy the "Authorization" '
+                            'header value.',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    _card(
+                      title: 'QUEUE CHANNELS (${_config.targets.length})',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (var i = 0; i < _config.targets.length; i++)
+                            ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: Text('GUILD ${_config.targets[i].guildId}'),
+                              subtitle: Text(
+                                'channel ${_config.targets[i].channelId}\n'
+                                '${_config.targets[i].customButtonId.isNotEmpty ? 'button id: ${_config.targets[i].customButtonId}' : 'keywords: ${_config.targets[i].keywords.join(', ')}'}',
+                              ),
+                              isThreeLine: true,
+                              trailing: IconButton(
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: _running ? null : () => _removeTarget(i),
+                              ),
+                            ),
+                          if (_config.targets.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.only(bottom: 8),
+                              child: Text('No queue channel yet.'),
+                            ),
+                          OutlinedButton.icon(
+                            onPressed: _running ? null : _addTarget,
+                            icon: const Icon(Icons.add),
+                            label: const Text('ADD QUEUE CHANNEL'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    _card(
+                      title: 'ALERTS & WEBHOOK RELAY',
+                      child: Column(
+                        children: [
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Play sound on snipe'),
+                            value: _config.soundEnabled,
+                            onChanged: _running
+                                ? null
+                                : (v) => _updateConfig(_config.copyWith(soundEnabled: v)),
+                          ),
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Pop-up notification + vibration'),
+                            value: _config.notifyEnabled,
+                            onChanged: _running
+                                ? null
+                                : (v) => _updateConfig(_config.copyWith(notifyEnabled: v)),
+                          ),
+                          TextField(
+                            controller: _webhookCtl,
+                            enabled: !_running,
+                            decoration: const InputDecoration(
+                              labelText: 'Discord webhook URL (optional)',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: OutlinedButton(
+                              onPressed: _running ? null : _applyWebhook,
+                              child: const Text('APPLY WEBHOOK'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    _card(
+                      title: 'LOG',
+                      child: SizedBox(
+                        height: 260,
+                        child: _log.isEmpty
+                            ? const Text(
+                                'Logs from Discord Gateway and queue snipes will '
+                                'stream here.',
+                              )
+                            : ListView.builder(
+                                reverse: true,
+                                itemCount: _log.length,
+                                itemBuilder: (_, i) => Text(
+                                  _log[_log.length - 1 - i],
+                                  style: const TextStyle(
+                                    fontFamily: 'monospace',
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            Widget _card({required String title, required Widget child}) => Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        child,
+                      ],
+                    ),
+                  ),
+                );
+          }
+
+          class _TargetDialog extends StatefulWidget {
+            const _TargetDialog();
+
+            @override
+            State<_TargetDialog> createState() => _TargetDialogState();
+          }
+
+          class _TargetDialogState extends State<_TargetDialog> {
+            final TextEditingController _guild = TextEditingController();
+            final TextEditingController _channel = TextEditingController();
+            final TextEditingController _button = TextEditingController();
+            final TextEditingController _keywords =
+                TextEditingController(text: QueueTarget.defaultKeywords.join(', '));
+            String? _error;
+
+            @override
+            void dispose() {
+              _guild.dispose();
+              _channel.dispose();
+              _button.dispose();
+              _keywords.dispose();
+              super.dispose();
+            }
+
+            void _submit() {
+              final g = _guild.text.trim();
+              final c = _channel.text.trim();
+              if (!isSnowflake(g) || !isSnowflake(c)) {
+                setState(() => _error = 'Guild and channel ids must be 15-21 digit
